@@ -1,0 +1,90 @@
+
+
+program ::= decls
+
+decl ::= func_decl | const_decl
+
+
+const_decl ::= `const` declarator `=` expr
+func_decl ::= `func` IDEN `(` params `)` block
+
+block ::= `{` stmts `}`
+
+stmts ::= stmt stmts
+    | epsilon
+
+stmt ::= return_stmt
+    | if_stmt
+    | while_stmt
+    | expr_stmt
+    | block
+
+return_stmt ::= `return` expr_stmt
+if_stmt ::= `if` expr block
+while_stmt ::= `while` expr block
+expr_stmt ::= expr `;`
+
+expr ::= or_expr expr_tail
+expr_tail ::= `=` expr
+    | epsilon
+
+or_expr ::= and_expr or_expr_tail
+or_expr_tail ::= `||` and_expr or_expr_tail
+    | epsilon
+
+and_expr ::= comp_expr and_expr_tail
+and_expr_tail ::= `&&` comp_expr and_expr_tail
+    | epsilon
+
+comp_expr ::= sum_expr comp_expr_tail
+comp_expr_tail ::= comp_op sum_expr comp_expr_tail
+    | epsilon
+
+sum_op ::= `<` | `<=` | `>` | `>=` | `==` | `!=`
+
+sum_expr ::= mul_expr sum_expr_tail
+sum_expr_tail ::= sum_op mul_expr sum_expr_tail
+    | epsilon
+
+sum_op ::= `+` | `-` | `|` | `^`
+
+mul_expr ::= pow_expr mul_expr_tail
+mul_expr_tail ::= mul_op pow_expr mul_expr_tail
+    | epsilon
+
+mul_op ::= `*` | `/` | `%` | `&`
+
+pow_expr ::= postfix_expr pow_expr_tail
+pow_expr_tail ::= `**` postfix_expr pow_expr_tail
+    | epsilon
+
+postfix_expr ::= primary_expr postfix_tail
+
+postfix_tail ::= postfix postfix_tail
+    | epsilon
+
+postfix ::= `(` args `)`
+    | `[` args `]`
+    | `.*`
+
+args ::= expr args'
+    | epsilon
+
+args' ::= `,` args
+    | epsilon
+
+primary_expr ::= INT_LIT | FLOAT_LIT | IDEN
+    | IMAG_INT_LIT | IMAG_FLOAT_LIT
+    | `(` expr `)`
+
+params ::= declarator params'
+    | epsilon
+params' ::= `,` params
+    | epsilon
+
+var_decl ::= `let` declarator `=` expr
+
+declarator ::= IDEN `:` type
+
+type ::= `bool` | `i8` | `i16` | `i32` | `i64`
+    | `u8` | `u16` | `u32` | `u64`
