@@ -9,6 +9,7 @@
 #include <memory>
 #include <format>
 #include <ranges>
+#include <unordered_map>
 
 #define MOVE(...) (static_cast<std::remove_reference_t<decltype(__VA_ARGS__)>&&>(__VA_ARGS__))
 
@@ -50,6 +51,87 @@ template <static_string S>
 consteval auto operator"" _c() {
     return S;
 }
+
+template <typename Self, typename F>
+constexpr decltype(auto) visit(Self&& self, F func) {
+    using void_ptr = std::conditional_t<std::is_const_v<std::remove_reference_t<Self>>, const void*, void*>;
+
+    constexpr static auto funcs = []<auto... Is>(std::index_sequence<Is...>){
+        return std::array{
+        +[](void* func, void_ptr s) -> decltype(auto) {
+            return static_cast<F*>(func)
+            ->template operator()< std::remove_cvref_t<Self>::Types[Is] >
+            (static_cast<std::remove_reference_t<Self>*>(s)->template get_< std::remove_cvref_t<Self>::Types[Is] > ());
+        }...
+        };
+    }(std::make_index_sequence<std::size(std::remove_cvref_t<Self>::Types)>{});
+
+    assert(std::ranges::find(std::remove_cvref_t<Self>::Types, self.type()) != std::end(std::remove_cvref_t<Self>::Types));
+    auto index = std::ranges::find(std::remove_cvref_t<Self>::Types, self.type()) - std::begin(std::remove_cvref_t<Self>::Types);
+    return funcs[index](&func, &self);
+}
+
+template <typename Self>
+struct SumType {
+    void copy(const Self& other) {
+        other.visit([&self = self()]<auto E>(const auto& val) {
+            std::construct_at(&self.template get_<E>(), val);
+        });
+    }
+
+    void move(Self&& other) {
+        other.visit([&self = self()]<auto E>(auto&& val) {
+            std::construct_at(&self.template get_<E>(), MOVE(val));
+        });
+    }
+
+    void destroy() {
+        self().visit([]<auto>(auto&& val) {
+            std::destroy_at(&val);
+        });
+    }
+
+    Self& operator=(const Self& other) { // NOLINT
+        self().destroy();
+        self().copy(other);
+        return self();
+    }
+
+    Self& operator=(Self&& other) { // NOLINT
+        self().destroy();
+        self().move(MOVE(other));
+        return self();
+    }
+
+    template <typename F>
+    constexpr decltype(auto) visit(F func) & {
+        return ::visit(self(), func);
+    }
+
+    template <typename F>
+    constexpr decltype(auto) visit(F func) const& {
+        return ::visit(self(), func);
+    }
+
+    template <typename F>
+    constexpr decltype(auto) visit(F func) && {
+        return ::visit(MOVE(self()), func);
+    }
+
+    template <typename F>
+    constexpr decltype(auto) visit(F func) const&& {
+        return ::visit(MOVE(self()), func);
+    }
+
+    Self& self() & { return *static_cast<Self*>(this); }
+    const Self& self() const& { return *static_cast<const Self*>(this); }
+    Self&& self() && { return MOVE(*static_cast<Self*>(this)); }
+    const Self&& self() const&& { return MOVE(*static_cast<const Self*>(this)); }
+
+
+};
+
+namespace lexer {
 
 struct Token {
     enum class Type : i64 {
@@ -129,12 +211,12 @@ struct Token {
         return type_ == t;
     }
 
-    template <i64 N>
-    [[nodiscard]] bool is(const Type (&arr)[N]) const {
+    template<i64 N>
+    [[nodiscard]] bool is(const Type (& arr)[N]) const {
         return std::ranges::find(arr, type_) != std::end(arr);
     }
 
-    template <Type Ty>
+    template<Type Ty>
     [[nodiscard]] auto as() const {
         assert(Ty == type_);
         if constexpr (Ty == Type::INT_LIT || Ty == Type::IMAG_INT_LIT) {
@@ -149,23 +231,23 @@ struct Token {
     }
 
     [[nodiscard]] i64 to_int() const {
-        assert(is({ Type::INT_LIT, Type::IMAG_INT_LIT }));
+        assert(is({Type::INT_LIT, Type::IMAG_INT_LIT}));
         return value.prim.i;
     }
 
     [[nodiscard]] f64 to_float() const {
-        assert(is({ Type::FLOAT_LIT, Type::IMAG_FLOAT_LIT }));
+        assert(is({Type::FLOAT_LIT, Type::IMAG_FLOAT_LIT}));
         return value.prim.f;
     }
 
     [[nodiscard]] const std::string& to_str() const& {
-        assert(is({ Type::STRING_LIT, Type::IDEN }));
+        assert(is({Type::STRING_LIT, Type::IDEN}));
 
         return value.str;
     }
 
     [[nodiscard]] std::string to_str() && {
-        assert(is({ Type::STRING_LIT, Type::IDEN }));
+        assert(is({Type::STRING_LIT, Type::IDEN}));
 
         return MOVE(value.str);
     }
@@ -177,18 +259,22 @@ struct Token {
 private:
     explicit Token(i64 line, i64 col, Type t) : line(line), col(col), value{.prim = {.end = {}}}, type_(t) {
     }
+
     explicit Token(i64 line, i64 col, std::string str, Type t) : line(line), col(col), value{.str = MOVE(str)}, type_(t) {
         assert(t == IDEN || t == STRING_LIT);
     }
+
     explicit Token(i64 line, i64 col, i64 val, Type t) : line(line), col(col), value{.prim = {.i = val}}, type_(t) {
         assert(t == INT_LIT || t == IMAG_INT_LIT);
     }
+
     explicit Token(i64 line, i64 col, f64 val, Type t) : line(line), col(col), value{.prim = {.f = val}}, type_(t) {
         assert(t == FLOAT_LIT || t == IMAG_FLOAT_LIT);
     }
 
     i64 line;
     i64 col;
+
     union Value {
         union {
             End end;
@@ -199,18 +285,20 @@ private:
 
         ~Value() {}
     } value;
+
     Type type_;
 
     friend struct TokenBuilder;
 };
 
-template <auto... Es>
+template<auto... Es>
 struct Enum {
     constexpr static inline i64 size = sizeof...(Es);
 };
 
-template <static_string... Ss> struct List {
-    constexpr static inline std::string_view values[] = { std::string_view(Ss)... };
+template<static_string... Ss>
+struct List {
+    constexpr static inline std::string_view values[] = {std::string_view(Ss)...};
     constexpr static inline i64 size = sizeof...(Ss);
 };
 
@@ -221,24 +309,31 @@ Token::Type::INT_LIT,
 Token::Type::FLOAT_LIT,
 Token::Type::IMAG_INT_LIT,
 Token::Type::IMAG_FLOAT_LIT>;
-using Symbols = List<"=", "(", ")", "{", "}", "||", "&&", "<", ">", "<=", ">=", "==", "!=", "+", "-", "|", "^", "*", "/", "%", "&", "**", "[", "]", ".*", ",", ":" >;
-using Keywords = List<"const", "func", "return", "if", "while", "let", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64" >;
+using Symbols = List<"=", "(", ")", "{", "}", "||", "&&", "<", ">", "<=", ">=", "==", "!=", "+", "-", "|", "^", "*", "/", "%", "&", "**", "[", "]", ".*", ",", ":", "=>", ";" >;
+using Keywords = List<"const", "func", "return", "if", "while", "let", "bool", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64">;
 
-template <typename, typename>
-struct Combine {};
+template<typename, typename>
+struct Combine {
+};
 
-template <static_string... Syms, static_string... Keyws>
+template<static_string... Syms, static_string... Keyws>
 struct Combine<List<Syms...>, List<Keyws...>> : List<Syms..., Keyws...> {
 };
 
-template <static_string S, typename L> requires (std::ranges::find(L::values, std::string_view(S)) != std::end(L::values))
+template<static_string S, typename L>
+requires (std::ranges::find(L::values, std::string_view(S)) != std::end(L::values))
 consteval i64 index(L) {
     return std::ranges::find(L::values, std::string_view(S)) - std::begin(L::values);
 }
 
-template <static_string S>
-consteval Token::Type operator""_tok() {
+template<static_string S>
+consteval Token::Type operator ""_tok() {
     return static_cast<Token::Type>(Types::size + index<S>(Combine<Symbols, Keywords>{}));
+}
+
+template <std::size_t N>
+constexpr bool is(Token::Type t, const Token::Type (&arr)[N]) {
+    return std::ranges::find(arr, t) != std::end(arr);
 }
 
 constexpr Token::Type symbol(i64 index) {
@@ -253,7 +348,8 @@ constexpr std::string_view to_string(Token::Type t) {
     return Combine<Symbols, Keywords>::values[static_cast<i64>(t) - Types::size];
 }
 
-struct imag_t {};
+struct imag_t {
+};
 
 struct TokenBuilder {
     TokenBuilder(i64 l, i64 c) : line(l), col(c) {
@@ -262,24 +358,31 @@ struct TokenBuilder {
     [[nodiscard]] Token end() const {
         return Token(line, col, Token::Type::END);
     }
+
     [[nodiscard]] Token iden(std::string s) const {
         return Token(line, col, MOVE(s), Token::IDEN);
     }
+
     [[nodiscard]] Token str(std::string s) const {
         return Token(line, col, MOVE(s), Token::STRING_LIT);
     }
+
     [[nodiscard]] Token int_(i64 i) const {
         return Token(line, col, i, Token::INT_LIT);
     }
+
     [[nodiscard]] Token int_(i64 i, imag_t) const {
         return Token(line, col, i, Token::IMAG_INT_LIT);
     }
+
     [[nodiscard]] Token float_(f64 f) const {
         return Token(line, col, f, Token::FLOAT_LIT);
     }
+
     [[nodiscard]] Token float_(f64 f, imag_t) const {
         return Token(line, col, f, Token::IMAG_FLOAT_LIT);
     }
+
     Token operator()(Token::Type kw) const {
         return Token(line, col, kw);
     }
@@ -289,12 +392,13 @@ private:
     i64 col;
 };
 
-template <std::forward_iterator Iter, static_string lineSep>
+template<std::forward_iterator Iter, static_string lineSep>
 struct PositionalIterator {
     using difference_type = std::ptrdiff_t;
     using value_type = char;
 
     PositionalIterator() = default;
+
     explicit PositionalIterator(Iter i) : it(i) {}
 
     std::iter_reference_t<Iter> operator*() const {
@@ -320,6 +424,7 @@ struct PositionalIterator {
     }
 
     friend bool operator==(PositionalIterator, PositionalIterator) = default;
+
     friend bool operator==(PositionalIterator lhs, Iter rhs) {
         return lhs.it == rhs;
     }
@@ -360,14 +465,14 @@ private:
 
 static_assert(std::forward_iterator<PositionalIterator<char*, "\n">>);
 
-template <std::forward_iterator Iter>
+template<std::forward_iterator Iter>
 struct Lexer {
-    template <std::ranges::forward_range R>
+    template<std::ranges::forward_range R>
     explicit Lexer(R&& r) : Lexer(begin(r), end(r)) {}
 
     explicit Lexer(Iter b, Iter e) : iter_(PositionalIterator<Iter, "\n">(b)), end_(e) {}
 
-    template <char Min, char Max>
+    template<char Min, char Max>
     constexpr static bool in_range(char c) {
         return Min <= c && c <= Max;
     }
@@ -457,7 +562,8 @@ struct Lexer {
                 }
                 ++iter_;
                 return builder.str(MOVE(s));
-            } else if (std::ranges::find(Symbols::values, *iter_, [](std::string_view s) { return s[0]; }) != std::end(Symbols::values)) {
+            } else if (std::ranges::find(Symbols::values, *iter_, [](std::string_view s) { return s[0]; }) !=
+                       std::end(Symbols::values)) {
                 bool candidates[Symbols::size] = {};
                 std::ranges::fill(candidates, true);
                 const auto start = iter_;
@@ -479,7 +585,8 @@ struct Lexer {
                     ++end;
                     for (i64 i = 0; i < Symbols::size; i++) {
                         if (candidates[i]) {
-                            if (scan+1 == Symbols::values[i].size() && std::ranges::equal(start, end, Symbols::values[i].begin(), Symbols::values[i].end())) {
+                            if (scan + 1 == Symbols::values[i].size() &&
+                                std::ranges::equal(start, end, Symbols::values[i].begin(), Symbols::values[i].end())) {
                                 result = symbol(i);
                                 iter_ = end;
                             }
@@ -494,6 +601,17 @@ struct Lexer {
         }
 
         return set(builder.end());
+    }
+
+    Token eat(Token::Type ty) {
+        assert(peek().is(ty));
+        return eat();
+    }
+
+    template <std::size_t N>
+    Token eat(const Token::Type (&ty)[N]) {
+        assert(peek().is(ty));
+        return eat();
     }
 
     [[nodiscard]] const Token& peek() const {
@@ -528,6 +646,7 @@ private:
     PositionalIterator<Iter, "\n"> iter_;
     Iter end_;
 };
+}
 
 template <typename T>
 struct Box;
@@ -571,12 +690,17 @@ Box<T> make_box(T x) {
     return Box<T>(std::make_unique<T>(MOVE(x)));
 }
 
+using lexer::operator"" _tok;
+
+namespace parser {
+
+
 struct Expr {
     Expr(const Expr& other) : type_{other.type_} {
         cpy(other);
     }
 
-    Expr(Expr&& other) noexcept : type_{other.type_} {
+    Expr(Expr&& other) noexcept: type_{other.type_} {
         move(static_cast<Expr&&>(other));
     }
 
@@ -632,27 +756,33 @@ struct Expr {
     struct CallExpr {
         Box<Expr> f;
         std::vector<Box<Expr>> args;
-        Token::Type op;
+        lexer::Token::Type op;
     };
 
     struct UnaryExpr {
         Box<Expr> expr;
-        Token::Type op;
+        lexer::Token::Type op;
     };
 
     struct BinaryExpr {
         Box<Expr> lhs;
         Box<Expr> rhs;
-        Token::Type op;
+        lexer::Token::Type op;
     };
 
-    explicit Expr(IntConst ic) : type_(INT_CONST), value{.prim = { .ic = ic }} {}
-    explicit Expr(FloatConst fc) : type_(FLOAT_CONST), value{.prim = { .fc = fc }} {}
-    explicit Expr(StringConst sc) : type_(STRING_CONST), value{ .sc = MOVE(sc) } {}
-    explicit Expr(IdenExpr iden) : type_(IDEN_EXPR), value{ .iden = MOVE(iden) } {}
-    explicit Expr(CallExpr call) : type_(CALL_EXPR), value{ .call = MOVE(call) } {}
-    explicit Expr(UnaryExpr unary) : type_(UNARY_EXPR), value{ .unary = MOVE(unary) } {}
-    explicit Expr(BinaryExpr bin) : type_(BINARY_EXPR), value{ .bin = MOVE(bin) } {}
+    explicit Expr(IntConst ic) : type_(INT_CONST), value{.prim = {.ic = ic}} {}
+
+    explicit Expr(FloatConst fc) : type_(FLOAT_CONST), value{.prim = {.fc = fc}} {}
+
+    explicit Expr(StringConst sc) : type_(STRING_CONST), value{.sc = MOVE(sc)} {}
+
+    explicit Expr(IdenExpr iden) : type_(IDEN_EXPR), value{.iden = MOVE(iden)} {}
+
+    explicit Expr(CallExpr call) : type_(CALL_EXPR), value{.call = MOVE(call)} {}
+
+    explicit Expr(UnaryExpr unary) : type_(UNARY_EXPR), value{.unary = MOVE(unary)} {}
+
+    explicit Expr(BinaryExpr bin) : type_(BINARY_EXPR), value{.bin = MOVE(bin)} {}
 
     [[nodiscard]] Type type() const {
         return type_;
@@ -698,14 +828,14 @@ struct Expr {
             std::format_to(ctx.out(), "){}", to_string(value.call.op));
             if (!value.call.args.empty()) {
                 value.call.args[0]->format(ctx);
-                for (const auto& x : value.call.args | std::views::drop(1)) {
+                for (const auto& x: value.call.args | std::views::drop(1)) {
                     std::format_to(ctx.out(), ", ");
                     x->format(ctx);
                 }
             }
 
             auto end = (value.call.op == "("_tok) ? ")" : "]";
-            std::format_to(ctx.out(), "{}",end);
+            std::format_to(ctx.out(), "{}", end);
             break;
         }
 
@@ -716,7 +846,7 @@ struct Expr {
         return ty == type_;
     }
 
-    template <Type Ty>
+    template<Type Ty>
     [[nodiscard]] const auto& as() const {
         assert(Ty == type_);
         if constexpr (Ty == Type::INT_CONST) {
@@ -736,8 +866,8 @@ struct Expr {
         }
     }
 
-    template <Type Ty>
-    [[nodiscard]] auto as() && {
+    template<Type Ty>
+    [[nodiscard]] auto as()&& {
         assert(Ty == type_);
         if constexpr (Ty == Type::INT_CONST) {
             return MOVE(value.prim.ic);
@@ -756,7 +886,7 @@ struct Expr {
         }
     }
 
-    template <typename F>
+    template<typename F>
     decltype(auto) visit(F f) const& {
         switch (type_) {
         case Type::INT_CONST:
@@ -777,8 +907,8 @@ struct Expr {
         assert(false);
     }
 
-    template <typename F>
-    decltype(auto) visit(F f) && {
+    template<typename F>
+    decltype(auto) visit(F f)&& {
         switch (type_) {
         case Type::INT_CONST:
             return f(auto(value.prim.ic));
@@ -840,8 +970,9 @@ private:
         case Type::CALL_EXPR:
             std::construct_at(&value.call, other.value.call);
             break;
-        default:
-            assert(false);
+        case Type::IDEN_EXPR:
+            std::construct_at(&value.iden, other.value.iden);
+            break;
         }
     }
 
@@ -886,29 +1017,70 @@ private:
     } value = {};
 };
 
-template<>
-struct std::formatter<Expr, char> {
-    constexpr format_parse_context::iterator parse(format_parse_context& ctx)
-    {
-        return ctx.begin();
+struct TypeSpec {
+    enum class Type {
+        KW,
+        IDEN,
+    };
+
+    using enum Type;
+
+    explicit TypeSpec(lexer::Token::Type kw) : value_{ kw } {
+        assert(value_.index() == static_cast<i64>(KW));
+        assert(is(kw, {
+            "bool"_tok,
+            "i8"_tok, "i16"_tok, "i32"_tok, "i64"_tok,
+            "u8"_tok, "u16"_tok, "u32"_tok, "u64"_tok
+        }));
     }
 
-    static format_context::iterator format(const Expr& e, format_context& ctx)
-    {
-        return e.format(ctx);
+    explicit TypeSpec(std::string iden) : value_{ MOVE(iden) } {
+        assert(value_.index() == static_cast<i64>(IDEN));
     }
+
+    [[nodiscard]] Type type() const {
+        return static_cast<Type>(value_.index());
+    }
+
+    [[nodiscard]] lexer::Token::Type kw() const {
+        return std::get<lexer::Token::Type>(value_);
+    }
+
+    [[nodiscard]] const std::string& iden() const& {
+        return std::get<std::string>(value_);
+    }
+
+    [[nodiscard]] std::string iden() && {
+        return std::get<std::string>(MOVE(value_));
+    }
+
+private:
+
+    std::variant<lexer::Token::Type, std::string> value_;
 };
 
 struct Func {
+    struct Param {
+        std::string iden;
+        TypeSpec type;
+    };
 
+    std::string iden;
+    std::vector<Param> params;
+    TypeSpec returnType;
+    Expr body;
+};
+
+struct Program {
+    std::vector<Func> funcs;
 };
 
 struct Parser {
-    explicit Parser(const Lexer<std::string::const_iterator>& lexer) noexcept : lexer_(lexer) {
+    explicit Parser(const lexer::Lexer <std::string::const_iterator>& lexer) noexcept: lexer_(lexer) {
         lexer_.eat();
     }
 
-    constexpr static inline Token::Type ops[] = {
+    constexpr static inline lexer::Token::Type ops[] = {
     "**"_tok,
     "*"_tok,
     "/"_tok,
@@ -929,7 +1101,7 @@ struct Parser {
     "="_tok,
     };
 
-    constexpr static int prec(Token::Type op) {
+    constexpr static int prec(lexer::Token::Type op) {
         switch (op) {
         case "**"_tok:
             return 7;
@@ -961,11 +1133,67 @@ struct Parser {
         }
     }
 
-    Expr parse_expr() {
-        using enum Token::Type;
+    Program parse_program() {
+        std::vector<Func> funcs;
+        while (!lexer_.peek().is(lexer::Token::Type::END)) {
+            funcs.push_back(parse_func());
+        }
 
+        return Program { MOVE(funcs) };
+    }
+
+    Func parse_func() {
+        lexer_.eat("func"_tok);
+        auto name = lexer_.peek().as<lexer::Token::Type::IDEN>();
+        lexer_.eat();
+        lexer_.eat("("_tok);
+
+        std::vector<Func::Param> params;
+        while (!lexer_.peek().is(")"_tok)) {
+            auto iden = lexer_.peek().as<lexer::Token::Type::IDEN>();
+            lexer_.eat();
+            lexer_.eat(":"_tok);
+
+            auto typeSpec = parse_type_spec();
+
+            params.push_back(Func::Param{ MOVE(iden), MOVE(typeSpec) });
+
+            assert(lexer_.peek().is({","_tok, ")"_tok}));
+
+            if (lexer_.peek().is(","_tok)) {
+                lexer_.eat();
+            }
+        }
+
+        lexer_.eat(")"_tok);
+        lexer_.eat(":"_tok);
+        auto returnType = parse_type_spec();
+        lexer_.eat("=>"_tok);
+        auto body = parse_expr();
+        lexer_.eat(";"_tok);
+
+        return Func{ MOVE(name), MOVE(params), MOVE(returnType), MOVE(body) };
+    }
+
+    TypeSpec parse_type_spec() {
         auto tok = lexer_.peek();
-        assert(tok.is({ IDEN, INT_LIT, IMAG_INT_LIT, FLOAT_LIT, IMAG_FLOAT_LIT, STRING_LIT, "("_tok }));
+
+        lexer_.eat({
+            "bool"_tok,
+            "i8"_tok, "i16"_tok, "i32"_tok, "i64"_tok,
+            "u8"_tok, "u16"_tok, "u32"_tok, "u64"_tok,
+            lexer::Token::Type::IDEN,
+        });
+
+        return tok.is(lexer::Token::Type::IDEN)
+            ? TypeSpec(tok.as<lexer::Token::Type::IDEN>())
+            : TypeSpec(tok.type());
+    }
+
+    Expr parse_expr() {
+        using enum lexer::Token::Type;
+
+        assert(lexer_.peek().is({IDEN, INT_LIT, IMAG_INT_LIT, FLOAT_LIT, IMAG_FLOAT_LIT, STRING_LIT, "("_tok}));
 
         auto expr = parse_postfix();
         auto curPrec = 1;
@@ -983,11 +1211,12 @@ struct Parser {
             lexer_.eat();
             auto rhs = parse_postfix();
 
-            while (lexer_.peek().is(ops) && (prec(lexer_.peek().type()) > prec(op) || (op == "="_tok && lexer_.peek().is("="_tok)))) {
+            while (lexer_.peek().is(ops) &&
+                   (prec(lexer_.peek().type()) > prec(op) || (op == "="_tok && lexer_.peek().is("="_tok)))) {
                 rhs = parse_bin_op_rhs(MOVE(rhs), prec(op) + (prec(lexer_.peek().type()) > prec(op)));
             }
 
-            lhs = Expr( Expr::BinaryExpr{ make_box(MOVE(lhs)), make_box(MOVE(rhs)), op } );
+            lhs = Expr(Expr::BinaryExpr{make_box(MOVE(lhs)), make_box(MOVE(rhs)), op});
         }
 
         return lhs;
@@ -995,8 +1224,8 @@ struct Parser {
 
     Expr parse_postfix() {
         auto expr = parse_primary();
-        while (lexer_.peek().is({ "("_tok, "["_tok, ".*"_tok })) {
-            if (lexer_.peek().is({ "("_tok, "["_tok })) {
+        while (lexer_.peek().is({"("_tok, "["_tok, ".*"_tok})) {
+            if (lexer_.peek().is({"("_tok, "["_tok})) {
                 auto op = lexer_.peek().type();
                 lexer_.eat();
                 auto end = op == "("_tok ? ")"_tok : "]"_tok;
@@ -1005,7 +1234,7 @@ struct Parser {
                 while (!lexer_.peek().is(end)) {
                     args.push_back(make_box(parse_expr()));
 
-                    assert(lexer_.peek().is({ ","_tok, end }));
+                    assert(lexer_.peek().is({","_tok, end}));
 
                     if (lexer_.peek().is(","_tok)) {
                         lexer_.eat();
@@ -1013,10 +1242,10 @@ struct Parser {
                 }
 
                 lexer_.eat();
-                expr = Expr( Expr::CallExpr{ make_box(MOVE(expr)), MOVE(args), op } );
+                expr = Expr(Expr::CallExpr{make_box(MOVE(expr)), MOVE(args), op});
             } else {
                 lexer_.eat();
-                expr = Expr( Expr::UnaryExpr{ make_box(MOVE(expr)), ".*"_tok } );
+                expr = Expr(Expr::UnaryExpr{make_box(MOVE(expr)), ".*"_tok});
             }
         }
 
@@ -1024,144 +1253,364 @@ struct Parser {
     }
 
     Expr parse_primary() {
-        using enum Token::Type;
+        using enum lexer::Token::Type;
 
         auto tok = lexer_.peek();
 
         if (tok.is(IDEN)) {
             lexer_.eat();
-            return Expr(Expr::IdenExpr{ MOVE(tok).to_str() });
-        } else if (tok.is({ INT_LIT, IMAG_INT_LIT })) {
+            return Expr(Expr::IdenExpr{MOVE(tok).to_str()});
+        } else if (tok.is({INT_LIT, IMAG_INT_LIT})) {
             lexer_.eat();
-            return Expr{ Expr::IntConst{ tok.to_int(), tok.type() == IMAG_INT_LIT } };
-        } else if (tok.is({ FLOAT_LIT, IMAG_FLOAT_LIT })) {
+            return Expr{Expr::IntConst{tok.to_int(), tok.type() == IMAG_INT_LIT}};
+        } else if (tok.is({FLOAT_LIT, IMAG_FLOAT_LIT})) {
             lexer_.eat();
-            return Expr{ Expr::FloatConst{ tok.to_float(), tok.type() == IMAG_FLOAT_LIT } };
+            return Expr{Expr::FloatConst{tok.to_float(), tok.type() == IMAG_FLOAT_LIT}};
         } else if (tok.is(STRING_LIT)) {
             lexer_.eat();
-            return Expr{ Expr::StringConst{ MOVE(tok).to_str() } };
+            return Expr{Expr::StringConst{MOVE(tok).to_str()}};
         } else if (tok.is("("_tok)) {
             lexer_.eat();
             auto expr = parse_expr();
-            assert(lexer_.peek().is(")"_tok));
-            lexer_.eat();
+            lexer_.eat(")"_tok);
             return expr;
         }
     }
 
 private:
 
-    Lexer<std::string::const_iterator> lexer_;
+    lexer::Lexer <std::string::const_iterator> lexer_;
+};
+}
+
+template<>
+struct std::formatter<parser::Expr, char> {
+    constexpr format_parse_context::iterator parse(format_parse_context& ctx) {
+        return ctx.begin();
+    }
+
+    static format_context::iterator format(const parser::Expr& e, format_context& ctx) {
+        return e.format(ctx);
+    }
 };
 
-
-struct Type {
-    enum class Class {
+struct Type_ {
+    enum class Type {
         I8, I16, I32, I64, I128,
         U8, U16, U32, U64, U128,
         BOOL, TYPE_REF,
     };
-};
 
+    using enum Type;
 
-struct Program {
-    Expr expr;
-};
+    explicit Type_(Type t) : type_(t) {}
+    explicit Type_(Type_* t) : type_(TYPE_REF), value{ .typeRef = t } {}
 
-class MyErrorHandler : public asmjit::ErrorHandler {
-public:
-    void handleError(asmjit::Error err, const char* message, asmjit::BaseEmitter* origin) override {
-        printf("AsmJit error: %s\n", message);
+    bool operator==(Type_ rhs) {
+        if (type_ != rhs.type_) {
+            return false;
+        }
+
+        if (type_ == TYPE_REF) {
+            return value.typeRef == rhs.value.typeRef;
+        }
+
+        return true;
     }
+
+    [[nodiscard]] bool is_signed() const {
+        return type_ == I8
+            || type_ == I16
+            || type_ == I32
+            || type_ == I64
+            || type_ == I128;
+    }
+
+    [[nodiscard]] bool is_unsigned() const {
+        return type_ == U8
+            || type_ == U16
+            || type_ == U32
+            || type_ == U64
+            || type_ == U128;
+    }
+
+    [[nodiscard]] Type type() const {
+        return type_;
+    }
+
+
+    asmjit::TypeId type_id() {
+        switch (type_) {
+        case Type_::Type::I8: return asmjit::TypeId::kInt8;
+        case Type_::Type::I16: return asmjit::TypeId::kInt16;
+        case Type_::Type::I32: return asmjit::TypeId::kInt32;
+        case Type_::Type::I64: return asmjit::TypeId::kInt64;
+        case Type_::Type::I128: assert(false);
+        case Type_::Type::U8: return asmjit::TypeId::kUInt8;
+        case Type_::Type::U16: return asmjit::TypeId::kUInt16;
+        case Type_::Type::U32: return asmjit::TypeId::kUInt32;
+        case Type_::Type::U64: return asmjit::TypeId::kUInt64;
+        case Type_::Type::U128: assert(false);
+        case Type_::Type::BOOL: return asmjit::TypeId::kInt8;
+        case Type_::Type::TYPE_REF: assert(false);
+        }
+    }
+
+private:
+    Type type_;
+    union {
+        Type_* typeRef;
+    } value{};
+};
+
+struct Func {
+    std::vector<Type_> params;
+    Type_ returnType;
+    asmjit::FuncNode* node;
+    asmjit::FuncSignature sig;
+};
+
+struct Value {
+    Type_ type;
+    asmjit::Operand val;
 };
 
 struct Compiler {
+    struct MyErrorHandler : asmjit::ErrorHandler {
+        void handleError(asmjit::Error err, const char* message, asmjit::BaseEmitter* origin) override {
+            printf("AsmJit error: %s\n", message);
+        }
+    };
+
     Compiler() {
         code.init(rt.environment(), rt.cpuFeatures());
         code.setErrorHandler(&myErrorHandler);
         code.attach(&cc);
     }
 
-    void codegen(const Program& e) {
-        using Func = int(*)();
-        asmjit::FuncNode* func = cc.addFunc(asmjit::FuncSignature::build<int>());
-        asmjit::Operand res = codegen(e.expr);
+    asmjit::x86::Gp into_gp(Value val) {
+        assert(val.val.isImm() || val.val.isGp());
 
-        if (res.opType() == asmjit::OperandType::kReg) {
-            cc.ret(res.as<asmjit::x86::Gp>());
-        } else if (res.opType() == asmjit::OperandType::kImm) {
-            auto r = cc.newGpd();
-            cc.mov(r, res.as<asmjit::Imm>());
-            cc.ret(r);
+        if (val.val.isGp()) {
+            return val.val.as<asmjit::x86::Gp>();
+        } else {
+            auto gp = cc.newGp(val.type.type_id());
+            cc.mov(gp, val.val.as<asmjit::Imm>());
+            return gp;
         }
-        cc.endFunc();
+    }
+
+    Value add(Value lhs, Value rhs) {
+        assert(lhs.type == rhs.type);
+        assert(lhs.val.isImm() || lhs.val.isGp());
+        assert(rhs.val.isImm() || rhs.val.isGp());
+        if (lhs.val.isImm() && rhs.val.isImm()) {
+            return Value { lhs.type, asmjit::imm(lhs.val.as<asmjit::Imm>().value() + rhs.val.as<asmjit::Imm>().value()) };
+        }
+
+        asmjit::x86::Gp reg = into_gp(lhs);
+
+        if (rhs.val.isImm()) {
+            cc.add(reg, rhs.val.as<asmjit::Imm>());
+        } else {
+            cc.add(reg, rhs.val.as<asmjit::x86::Gp>());
+        }
+
+        return Value { lhs.type, reg };
+    }
+
+    Value sub(Value lhs, Value rhs) {
+        assert(lhs.type == rhs.type);
+        assert(lhs.val.isImm() || lhs.val.isGp());
+        assert(rhs.val.isImm() || rhs.val.isGp());
+        if (lhs.val.isImm() && rhs.val.isImm()) {
+            return Value { lhs.type, asmjit::imm(lhs.val.as<asmjit::Imm>().value() - rhs.val.as<asmjit::Imm>().value()) };
+        }
+
+        asmjit::x86::Gp reg = into_gp(lhs);
+
+        if (rhs.val.isImm()) {
+            cc.sub(reg, rhs.val.as<asmjit::Imm>());
+        } else {
+            cc.sub(reg, rhs.val.as<asmjit::x86::Gp>());
+        }
+
+        return Value { lhs.type, reg };
+    }
+
+    Value mul(Value lhs, Value rhs) {
+        assert(lhs.type == rhs.type);
+        assert(lhs.val.isImm() || lhs.val.isGp());
+        assert(rhs.val.isImm() || rhs.val.isGp());
+        if (lhs.val.isImm() && rhs.val.isImm()) {
+            return Value { lhs.type, asmjit::imm(lhs.val.as<asmjit::Imm>().value() * rhs.val.as<asmjit::Imm>().value()) };
+        }
+
+        asmjit::x86::Gp reg = into_gp(lhs);
+
+        if (rhs.val.isImm()) {
+            cc.imul(reg, rhs.val.as<asmjit::Imm>());
+        } else {
+            cc.imul(reg, rhs.val.as<asmjit::x86::Gp>());
+        }
+
+        return Value { lhs.type, reg };
+    }
+
+    std::array<Value, 2> div(Value lhs, Value rhs) {
+        assert(lhs.type == rhs.type);
+        assert(lhs.val.isImm() || lhs.val.isGp());
+        assert(rhs.val.isImm() || rhs.val.isGp());
+        if (lhs.val.isImm() && rhs.val.isImm()) {
+            return {
+                Value{ lhs.type, asmjit::imm(lhs.val.as<asmjit::Imm>().value() / rhs.val.as<asmjit::Imm>().value()) },
+                Value{ lhs.type, asmjit::imm(lhs.val.as<asmjit::Imm>().value() % rhs.val.as<asmjit::Imm>().value()) },
+            };
+        }
+
+        asmjit::x86::Gp quot = into_gp(lhs);
+        asmjit::x86::Gp rem = cc.newGp(lhs.type.type_id());
+        asmjit::x86::Gp res = into_gp(rhs);
+
+        cc.cdq(rem, quot);
+        cc.idiv(rem, quot, res);
+
+        return {
+            Value{lhs.type, quot},
+            Value{lhs.type, rem},
+        };
+    }
+
+    Type_ lookup_type(const parser::TypeSpec& t) {
+        switch (t.kw()) {
+        case "i8"_tok: return Type_(Type_::Type::I8);
+        case "i16"_tok: return Type_(Type_::Type::I16);
+        case "i32"_tok: return Type_(Type_::Type::I32);
+        case "i64"_tok: return Type_(Type_::Type::I64);
+
+        case "u8"_tok: return Type_(Type_::Type::U8);
+        case "u16"_tok: return Type_(Type_::Type::U16);
+        case "u32"_tok: return Type_(Type_::Type::U32);
+        case "u64"_tok: return Type_(Type_::Type::U64);
+        case "bool"_tok: return Type_(Type_::Type::BOOL);
+        }
+
+        assert(false);
+    }
+
+    void codegen(const parser::Program& e) {
+        for (const auto& func : e.funcs) {
+            asmjit::FuncSignature sig;
+            auto retType = lookup_type(func.returnType);
+            sig.setRet(retType.type_id());
+
+            std::vector<Type_> params;
+            for (const auto& param : func.params) {
+                auto t = lookup_type(param.type);
+                sig.addArg(t.type_id());
+                params.push_back(t);
+            }
+
+            asmjit::FuncNode* f;
+            cc.newFuncNode(&f, sig);
+            funcs.try_emplace(func.iden, Func{ MOVE(params), retType, f, sig });
+        }
+
+        for (const auto& func : e.funcs) {
+            codegen(func);
+        }
 
         asmjit::String s;
         asmjit::Formatter::formatNodeList(s, {}, &cc);
         printf("%s\n-----------------\n", s.data());
 
-
         cc.finalize();
 
-        Func fn;
-        rt.add(&fn, &code);
-        printf("%d\n", fn());
-        rt.release(fn);
-
+        auto main_ = funcs.find("main");
+        if (main_ != end(funcs)) {
+            asmjit::FuncNode* node = main_->second.node;
+            auto label = node->label();
+            auto offset = code.labelOffsetFromBase(label);
+            unsigned char* base;
+            rt.add(&base, &code);
+            auto mainPtr = asmjit::ptr_as_func<int(*)()>(base + offset);
+            printf("%d\n", mainPtr());
+            rt.release(base);
+        }
     }
 
-    asmjit::Operand codegen(const Expr& e) {
-        if (e.is(Expr::Type::INT_CONST)) {
-            return asmjit::imm(e.as<Expr::Type::INT_CONST>().value);
-        } else if (e.is(Expr::Type::BINARY_EXPR)) {
-            const auto& bin = e.as<Expr::Type::BINARY_EXPR>();
+    void codegen(const parser::Func& f) {
+        auto func_ = funcs.find(f.iden)->second;
+        cc.addFunc(func_.node);
+        for (i64 i = 0; i < func_.node->argCount(); i++) {
+            auto gp = cc.newGp(func_.params[i].type_id());
+            vars.try_emplace(f.params[i].iden, Value {
+                func_.params[i],
+                gp,
+            });
+            func_.node->setArg(i, gp);
+        }
+
+        auto ret = codegen(f.body);
+        vars = {};
+
+        assert(ret.type == func_.returnType);
+        cc.ret(into_gp(ret));
+        cc.endFunc();
+    }
+
+    Value codegen(const parser::Expr& e) {
+        if (e.is(parser::Expr::Type::INT_CONST)) {
+            return { Type_(Type_::I64), asmjit::imm(e.as<parser::Expr::Type::INT_CONST>().value) };
+        } else if (e.is(parser::Expr::Type::IDEN_EXPR)) {
+            const auto& iden = e.as<parser::Expr::Type::IDEN_EXPR>();
+            auto x = vars.find(iden.name);
+            assert(x != end(vars));
+            return x->second;
+        } else if (e.is(parser::Expr::Type::CALL_EXPR)) {
+            const auto& call = e.as<parser::Expr::Type::CALL_EXPR>();
+            auto f = call.f->as<parser::Expr::Type::IDEN_EXPR>();
+            auto lookup = funcs.find(f.name);
+            assert(lookup != end(funcs));
+
+            asmjit::InvokeNode* invokeNode;
+            cc.invoke(&invokeNode, lookup->second.node->label(), lookup->second.sig);
+            auto n = lookup->second.sig.argCount();
+            assert(n == call.args.size());
+            for (i64 i = 0; i < n; i++) {
+                auto val = codegen(*call.args[i]);
+                assert(val.type == lookup->second.params[i]);
+                if (val.val.isImm()) {
+                    invokeNode->setArg(i, val.val.as<asmjit::Imm>());
+                } else {
+                    invokeNode->setArg(i, val.val.as<asmjit::BaseReg>());
+                }
+            }
+            auto ret = cc.newGp(lookup->second.returnType.type_id());
+            invokeNode->setRet(0, ret);
+            return Value { lookup->second.returnType, ret };
+
+        } else if (e.is(parser::Expr::Type::BINARY_EXPR)) {
+            const auto& bin = e.as<parser::Expr::Type::BINARY_EXPR>();
 
             auto lhs = codegen(*bin.lhs);
             auto rhs = codegen(*bin.rhs);
             switch (bin.op) {
             case "+"_tok: {
-                auto r = cc.newInt32();
-                if (lhs.opType() == asmjit::OperandType::kReg) {
-                    cc.mov(r, lhs.as<asmjit::x86::Gp>());
-                } else if (lhs.opType() == asmjit::OperandType::kImm) {
-                    cc.mov(r, lhs.as<asmjit::Imm>());
-                }
-
-                if (rhs.opType() == asmjit::OperandType::kReg) {
-                    cc.add(r, rhs.as<asmjit::x86::Gp>());
-                } else if (rhs.opType() == asmjit::OperandType::kImm) {
-                    cc.add(r, rhs.as<asmjit::Imm>());
-                }
-                return r;
+                return add(lhs, rhs);
             }
-//            case "-"_tok: {
-//                auto r = cc.newInt32();
-//                cc.mov(r, lhs);
-//                cc.sub(r, rhs);
-//                return r;
-//            }
-//            case "*"_tok: {
-//                auto r = cc.newInt32();
-//                cc.mov(r, lhs);
-//                cc.imul(r, rhs);
-//                return r;
-//            }
-//            case "/"_tok: {
-//                auto quot = cc.newGpd();
-//                auto rem = cc.newGpd();
-//                cc.mov(quot, lhs);
-//                cc.cdq( rem, quot);
-//                cc.idiv(rem, quot, rhs);
-//                return quot;
-//            }
-//            case "%"_tok: {
-//                auto quot = cc.newGpd();
-//                auto rem = cc.newGpd();
-//                cc.mov(quot, lhs);
-//                cc.cdq( rem, quot);
-//                cc.idiv(rem, quot, rhs);
-//                return rem;
-//            }
+            case "-"_tok: {
+                return sub(lhs, rhs);
+            }
+            case "*"_tok: {
+                return mul(lhs, rhs);
+            }
+            case "/"_tok: {
+                return div(lhs, rhs)[0];
+            }
+            case "%"_tok: {
+                return div(lhs, rhs)[1];
+            }
 //            case "&"_tok: {
 //                auto r = cc.newInt32();
 //                cc.mov(r, lhs);
@@ -1191,29 +1640,26 @@ struct Compiler {
     asmjit::JitRuntime rt;
     asmjit::CodeHolder code;
     asmjit::x86::Compiler cc;
+    std::unordered_map<std::string, Func> funcs;
+    std::unordered_map<std::string, Value> vars;
 };
 
 int main() {
     std::string s = "return x0 + 2.3";
-    Lexer l(begin(s), end(s));
+    lexer::Lexer l(begin(s), end(s));
     assert(l.eat().type() == "return"_tok);
     assert(l.eat().to_str() == "x0");
     assert(l.eat().is("+"_tok));
     assert(l.eat().to_float() == 2.3);
-    assert(l.eat().type() == Token::END);
+    assert(l.eat().type() == lexer::Token::END);
 
-    std::string s2 = " 4";
-    Parser p ( Lexer(cbegin(s2), cend(s2)) );
+    std::string s2 = R"(
+func main(): i64 => f(7, 2);
+func f(x: i64, y: i64): i64 => (x+y) % y + x;
+)";
+    parser::Parser p ( lexer::Lexer(cbegin(s2), cend(s2)) );
 
-    auto y = p.parse_expr();
-
-//    std::cout << to_string("**"_tok);
-    std::cout << std::format("{}\n", y);
-//    std::cout << (l.eat()->as<Token::Type::SYMBOL>() == "!="_sym) << '\n';
-
-    static_assert(symbol(3) == "{"_tok);
-    assert(to_string("^"_tok) == "^");
-
+    auto prog = p.parse_program();
     Compiler c;
-    c.codegen(Program{ y });
+    c.codegen(prog);
 }

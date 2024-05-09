@@ -6,7 +6,7 @@ decl ::= func_decl | const_decl
 
 
 const_decl ::= `const` declarator `=` expr
-func_decl ::= `func` IDEN `(` params `)` block
+func_decl ::= `func` IDEN `(` params `)` `:` type block
 
 block ::= `{` stmts `}`
 
@@ -87,4 +87,4 @@ var_decl ::= `let` declarator `=` expr
 declarator ::= IDEN `:` type
 
 type ::= `bool` | `i8` | `i16` | `i32` | `i64`
-    | `u8` | `u16` | `u32` | `u64`
+    | `u8` | `u16` | `u32` | `u64` | IDEN
